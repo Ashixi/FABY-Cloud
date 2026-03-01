@@ -10,7 +10,7 @@
 
 ## 🇺🇸 English Version
 
-**FABY Cloud** is the core of an absolute-privacy cloud storage solution, part of the [Boardly](https://boardly.studio) / SHAS Development ecosystem.
+**FABY Cloud** is the core of an absolute-privacy cloud storage solution, part of the [FABY](https://faby.world) / SHAS Development ecosystem.
 
 This repository contains the **client-side (Flutter)** for virtual file system (VFS) and cryptography management, as well as the **public backend routes (FastAPI)**. We open-sourced this code to prove the transparency of our infrastructure and guarantee our adherence to **Zero-Knowledge (ZK)** principles.
 
@@ -65,7 +65,7 @@ FABY Cloud utilizes a robust multi-layered encryption architecture based on **AE
 
 ## 🇺🇦 Українська версія
 
-**FABY Cloud** — це ядро хмарного сховища з абсолютною приватністю, частина екосистеми [Boardly](https://boardly.studio) / SHAS Development. 
+**FABY Cloud** — це ядро хмарного сховища з абсолютною приватністю, частина екосистеми [FABY](https://faby.world) / SHAS Development. 
 
 Цей репозиторій містить **клієнтську частину (Flutter)** для роботи з віртуальною файловою системою (VFS) та криптографією, а також **публічні роути бекенду (FastAPI)**. Ми відкрили цей код, щоб довести прозорість нашої інфраструктури та гарантувати дотримання принципів **Zero-Knowledge (ZK)**.
 
