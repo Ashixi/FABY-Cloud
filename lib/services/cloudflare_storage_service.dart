@@ -4,17 +4,17 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 
-import 'package:boardly_cloud/services/auth_http_client.dart';
-import 'package:boardly_cloud/services/encryption_service.dart';
+import 'package:faby/services/auth_http_client.dart';
+import 'package:faby/services/encryption_service.dart';
 
 class CloudflareStorageService {
-  // MARK: - DEPENDENCIES & CONFIG
+  // MARK: - CONFIGURATION
   static const String _baseUrl = 'https://api.boardly.studio/storage';
   final _encryptionService = EncryptionService();
   final _uuid = const Uuid();
   final _authClient = AuthHttpClient();
 
-  // MARK: - FILE UPLOAD (BLOBS & MULTIPART)
+  // MARK: - FILE UPLOADS
   Future<bool> uploadFile(String fileId, File file) async {
     try {
       final rawBytes = await file.readAsBytes();
@@ -30,10 +30,10 @@ class CloudflareStorageService {
       if (response.statusCode != 200) return false;
       final uploadUrl = jsonDecode(response.body)['upload_url'];
 
-      final uploadResponse = await http.put(
-        Uri.parse(uploadUrl),
-        body: encryptedBytes,
-      );
+      final uploadResponse = await http
+          .put(Uri.parse(uploadUrl), body: encryptedBytes)
+          .timeout(const Duration(seconds: 30));
+
       return uploadResponse.statusCode == 200;
     } catch (e) {
       print('[EXCEPTION] Blob Upload: $e');
@@ -68,9 +68,11 @@ class CloudflareStorageService {
         body: jsonEncode({'file_id': fileId}),
       );
 
-      if (response.statusCode != 200) return false;
-      final uploadUrl = jsonDecode(response.body)['upload_url'];
+      if (response.statusCode != 200) {
+        throw Exception('API Error: ${response.statusCode} - ${response.body}');
+      }
 
+      final uploadUrl = jsonDecode(response.body)['upload_url'];
       var request = http.StreamedRequest('PUT', Uri.parse(uploadUrl));
       request.contentLength = contentLength;
 
@@ -80,11 +82,21 @@ class CloudflareStorageService {
         onError: (e) => request.sink.addError(e),
       );
 
-      final streamedResponse = await request.send();
-      return streamedResponse.statusCode == 200;
+      final streamedResponse = await request.send().timeout(
+        const Duration(seconds: 60),
+      );
+
+      if (streamedResponse.statusCode != 200) {
+        final errorBody = await streamedResponse.stream.bytesToString();
+        throw Exception(
+          'R2 Error: ${streamedResponse.statusCode} - $errorBody',
+        );
+      }
+
+      return true;
     } catch (e) {
       print('[EXCEPTION] Single Stream Upload: $e');
-      return false;
+      rethrow;
     }
   }
 
@@ -103,8 +115,10 @@ class CloudflareStorageService {
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'file_id': fileId}),
       );
-      if (initRes.statusCode != 200)
+
+      if (initRes.statusCode != 200) {
         throw Exception('Failed to initiate Multipart');
+      }
 
       final uploadId = jsonDecode(initRes.body)['upload_id'];
 
@@ -118,8 +132,10 @@ class CloudflareStorageService {
           'parts_count': partsCount,
         }),
       );
-      if (urlsRes.statusCode != 200)
+
+      if (urlsRes.statusCode != 200) {
         throw Exception('Failed to get chunk URLs');
+      }
 
       final urlsData = jsonDecode(urlsRes.body)['urls'] as List;
       Map<int, String> partUrls = {
@@ -142,6 +158,7 @@ class CloudflareStorageService {
             partUrls[currentPart]!,
             bytesToUpload,
           );
+
           if (eTag == null)
             throw Exception('Error uploading part $currentPart');
 
@@ -158,6 +175,7 @@ class CloudflareStorageService {
           partUrls[currentPart]!,
           chunkBuilder.toBytes(),
         );
+
         if (eTag == null) throw Exception('Error uploading final part');
         uploadedParts.add({"PartNumber": currentPart, "ETag": eTag});
       }
@@ -183,14 +201,15 @@ class CloudflareStorageService {
   Future<String?> _uploadChunkPut(String url, Uint8List bytes) async {
     final request = http.Request('PUT', Uri.parse(url));
     request.bodyBytes = bytes;
-    final response = await request.send();
+    final response = await request.send().timeout(const Duration(seconds: 60));
+
     if (response.statusCode == 200) {
       return response.headers['etag']?.replaceAll('"', '');
     }
     return null;
   }
 
-  // MARK: - FILE MANAGEMENT (DOWNLOAD, DELETE, CONFIRM)
+  // MARK: - FILE MANAGEMENT
   Future<String?> getFileDownloadUrl(String fileId) async {
     try {
       final response = await _authClient.request(
@@ -239,13 +258,14 @@ class CloudflareStorageService {
     }
   }
 
-  // MARK: - VFS NODES (JSON)
+  // MARK: - VFS NODES
   Future<List<Map<String, dynamic>>> getCloudNodesMeta() async {
     try {
       final response = await _authClient.request(
         Uri.parse('$_baseUrl/nodes/list'),
         method: 'GET',
       );
+
       if (response.statusCode == 200) {
         final List<dynamic> nodes = jsonDecode(response.body)['nodes'];
         return nodes.cast<Map<String, dynamic>>();
@@ -280,14 +300,15 @@ class CloudflareStorageService {
           headers['If-Match'] = expectedEtag;
         }
 
-        final uploadResponse = await http.put(
-          Uri.parse(uploadUrl),
-          headers: headers.isEmpty ? null : headers,
-          body: encryptedNode,
-        );
+        final uploadResponse = await http
+            .put(
+              Uri.parse(uploadUrl),
+              headers: headers.isEmpty ? null : headers,
+              body: encryptedNode,
+            )
+            .timeout(const Duration(seconds: 15));
 
         if (uploadResponse.statusCode == 412) return false;
-
         return uploadResponse.statusCode == 200;
       }
       return false;
@@ -299,16 +320,20 @@ class CloudflareStorageService {
 
   Future<Map<String, dynamic>?> downloadNodeJson(String nodeId) async {
     try {
-      final response = await _authClient.request(
-        Uri.parse('$_baseUrl/node/download-url'),
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'node_id': nodeId}),
-      );
+      final response = await _authClient
+          .request(
+            Uri.parse('$_baseUrl/node/download-url'),
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: jsonEncode({'node_id': nodeId}),
+          )
+          .timeout(const Duration(seconds: 30));
 
       if (response.statusCode == 200) {
         final downloadUrl = jsonDecode(response.body)['download_url'];
-        final fetchResponse = await http.get(Uri.parse(downloadUrl));
+        final fetchResponse = await http
+            .get(Uri.parse(downloadUrl))
+            .timeout(const Duration(seconds: 30));
 
         if (fetchResponse.statusCode == 200) {
           final decryptedText = await _encryptionService.decryptText(
@@ -337,7 +362,7 @@ class CloudflareStorageService {
     }
   }
 
-  // MARK: - SHARING (LINKS & FOLDERS)
+  // MARK: - SHARING
   Future<Map<String, dynamic>?> getSharedFileMetadataAndUrl(
     String shareId,
   ) async {
@@ -366,10 +391,10 @@ class CloudflareStorageService {
       if (response.statusCode != 200) return false;
       final uploadUrl = jsonDecode(response.body)['upload_url'];
 
-      final uploadResponse = await http.put(
-        Uri.parse(uploadUrl),
-        body: encryptedBytes,
-      );
+      final uploadResponse = await http
+          .put(Uri.parse(uploadUrl), body: encryptedBytes)
+          .timeout(const Duration(seconds: 30));
+
       return uploadResponse.statusCode == 200;
     } catch (e) {
       print('[EXCEPTION] Upload Bytes: $e');
@@ -505,7 +530,7 @@ class CloudflareStorageService {
     }
   }
 
-  // MARK: - TRASH
+  // MARK: - TRASH MANAGEMENT
   Future<Map<String, dynamic>?> getTrashItems() async {
     try {
       final response = await _authClient.request(
@@ -534,6 +559,68 @@ class CloudflareStorageService {
           (itemType == 'file' && response.statusCode == 404);
     } catch (e) {
       print('[EXCEPTION] Restore Trash: $e');
+      return false;
+    }
+  }
+
+  Future<bool> logicalDeleteToTrash(List<Map<String, dynamic>> items) async {
+    try {
+      final response = await _authClient.request(
+        Uri.parse('$_baseUrl/trash/logical-delete'),
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'items': items}),
+      );
+      return response.statusCode == 200;
+    } catch (e) {
+      print('[EXCEPTION] Logical Batch Delete: $e');
+      return false;
+    }
+  }
+
+  // MARK: - SYSTEM WIPE
+  Future<bool> wipeAllData() async {
+    try {
+      final response = await _authClient.request(
+        Uri.parse('$_baseUrl/system/recovery/wipe'),
+        method: 'DELETE',
+        headers: {'Content-Type': 'application/json'},
+      );
+      return response.statusCode == 200;
+    } catch (e) {
+      print('[EXCEPTION] Wipe Data: $e');
+      return false;
+    }
+  }
+
+  // MARK: - VFS V2 (SNAPSHOTS)
+  Future<String?> getVfsSnapshotUrl(bool isUpload) async {
+    try {
+      final response = await _authClient.request(
+        Uri.parse('$_baseUrl/vfs/snapshot-url'),
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'action': isUpload ? 'upload' : 'download'}),
+      );
+
+      if (response.statusCode == 200) {
+        return jsonDecode(response.body)['url'];
+      }
+      return null;
+    } catch (e) {
+      print('[EXCEPTION] Get VFS Snapshot URL: $e');
+      return null;
+    }
+  }
+
+  Future<bool> upgradeVfsVersion() async {
+    try {
+      final response = await _authClient.request(
+        Uri.parse('$_baseUrl/vfs/upgrade'),
+        method: 'POST',
+      );
+      return response.statusCode == 200;
+    } catch (e) {
       return false;
     }
   }

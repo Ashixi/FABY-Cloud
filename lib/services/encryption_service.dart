@@ -8,7 +8,7 @@ import 'package:cryptography/cryptography.dart';
 class EncryptionService {
   // MARK: - CONSTANTS & CONFIG
   final _storage = const FlutterSecureStorage();
-  static const _keyAlias = 'boardly_cloud_aes_key';
+  static const _keyAlias = 'faby_aes_key';
 
   static const int _nonceLength = 12;
   static const int _macLength = 16;

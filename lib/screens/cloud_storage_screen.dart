@@ -12,16 +12,20 @@ import 'package:desktop_drop/desktop_drop.dart';
 import 'package:cross_file/cross_file.dart';
 import 'package:path/path.dart' as p;
 
-import 'package:boardly_cloud/models/vfs_node.dart';
-import 'package:boardly_cloud/models/user_data.dart';
-import 'package:boardly_cloud/services/auth_http_client.dart';
-import 'package:boardly_cloud/storage/auth_storage.dart';
-import 'package:boardly_cloud/services/cloudflare_storage_service.dart';
-import 'package:boardly_cloud/services/vfs_manager.dart';
-import 'package:boardly_cloud/services/encryption_service.dart';
-import 'package:boardly_cloud/widgets/side_file_manager.dart';
+import 'package:faby/models/vfs_node.dart';
+import 'package:faby/models/user_data.dart';
+import 'package:faby/services/auth_http_client.dart';
+import 'package:faby/storage/auth_storage.dart';
+import 'package:faby/services/cloudflare_storage_service.dart';
+import 'package:faby/services/vfs_manager.dart';
+import 'package:faby/services/encryption_service.dart';
+import 'package:faby/widgets/side_file_manager.dart';
 import '../translations.dart';
 import '../main.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'package:sqlite3_flutter_libs/sqlite3_flutter_libs.dart';
+
+// MARK: - MAIN WIDGET
 
 class CloudStorageScreen extends StatefulWidget {
   const CloudStorageScreen({super.key});
@@ -32,7 +36,7 @@ class CloudStorageScreen extends StatefulWidget {
 
 class _CloudStorageScreenState extends State<CloudStorageScreen>
     with WidgetsBindingObserver {
-  // MARK: - STATE & SERVICES
+  // MARK: - STATE AND SERVICES
   final _storageService = CloudflareStorageService();
   final _vfsManager = VfsManager();
   final _encryption = EncryptionService();
@@ -60,6 +64,17 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
 
   UserData? _currentUserData;
 
+  final List<UploadTask> _uploadTasks = [];
+  bool _showUploadQueue = false;
+  bool _isUploadQueueMinimized = false;
+
+  final List<Map<String, dynamic>> _uploadQueue = [];
+  int _activeUploads = 0;
+  static const int _maxConcurrentUploads = 3;
+
+  int _totalQueueFiles = 0;
+  int _completedQueueFiles = 0;
+
   final List<VfsNode> _pathStack = [
     VfsNode(id: 'root', parentId: '', name: 'root', isFolder: true),
   ];
@@ -85,20 +100,35 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
+
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      _vfsManager.forceSyncNow();
+    }
+
     if (state == AppLifecycleState.resumed) {
       if (!_needsKeySetup && !_isCheckingKey) {
         _silentRefresh();
+        _refreshUserDataFromServer();
       }
     }
   }
 
-  // MARK: - CORE DATA & AUTH
+  // MARK: - CORE DATA AND AUTH
   Future<void> _initializeApp() async {
-    _currentUserData = await AuthStorage.getUserData();
-    await _silentRefresh();
     await _checkMasterKey();
     _focusNode.requestFocus();
-    _refreshUserDataFromServer();
+
+    if (!_needsKeySetup) {
+      try {
+        _currentUserData = await AuthStorage.getUserData();
+        await _silentRefresh();
+      } catch (e) {
+        print('[INIT ERROR] $e');
+      } finally {
+        _refreshUserDataFromServer();
+      }
+    }
   }
 
   Future<void> _silentRefresh() async {
@@ -108,9 +138,17 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
 
   Future<void> _loadInitialData() async {
     setState(() => _isLoading = true);
-    await _vfsManager.initDB();
-    await _vfsManager.sync();
-    if (mounted) setState(() => _isLoading = false);
+    try {
+      await _vfsManager.initDB();
+      await _vfsManager.sync();
+    } catch (e) {
+      print('[INIT ERROR] $e');
+      _showSnackBar('Помилка ініціалізації: $e', Colors.redAccent);
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
   }
 
   Future<void> _refreshUserDataFromServer() async {
@@ -156,7 +194,7 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
     }
   }
 
-  // MARK: - VAULT & SECURITY FLOW
+  // MARK: - VAULT AND SECURITY FLOW
   Future<void> _checkMasterKey() async {
     setState(() => _isCheckingKey = true);
     try {
@@ -211,10 +249,9 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
         utf8.encode(randomSalt) + encryptedMasterKeyBytes,
       );
       final uploadUrl = await _storageService.getRecoveryUploadUrl();
-      final response = await http.put(
-        Uri.parse(uploadUrl),
-        body: combinedPayload,
-      );
+      final response = await http
+          .put(Uri.parse(uploadUrl), body: combinedPayload)
+          .timeout(const Duration(seconds: 15));
 
       if (response.statusCode == 200) {
         await _secureStorage.write(
@@ -241,7 +278,9 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
     _setProcessing(true, tr(context, 'restoring'));
     try {
       final downloadUrl = await _storageService.getRecoveryDownloadUrl();
-      final response = await http.get(Uri.parse(downloadUrl));
+      final response = await http
+          .get(Uri.parse(downloadUrl))
+          .timeout(const Duration(seconds: 15));
 
       if (response.statusCode == 200) {
         final fullBytes = response.bodyBytes;
@@ -283,47 +322,80 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
     }
   }
 
-  // MARK: - UPLOAD & DOWNLOAD LOGIC
+  // MARK: - FILE UPLOAD AND QUEUE
   Future<void> _processDroppedFiles(List<XFile> droppedFiles) async {
-    _setProcessing(true, tr(context, 'processing'));
-    int successCount = 0;
-
     for (var xFile in droppedFiles) {
       final path = xFile.path;
-      if (await FileSystemEntity.isDirectory(path)) {
-        await _uploadDirectory(Directory(path), _currentFolderId);
-        successCount++;
-      } else if (await FileSystemEntity.isFile(path)) {
-        final file = File(path);
-        final fileName = p.basename(path);
-        bool success = await _uploadLocalFile(file, fileName, _currentFolderId);
-        if (success) successCount++;
-      }
-    }
 
-    _setProcessing(false);
-    if (successCount > 0) {
-      _showSnackBar(
-        '${tr(context, 'files_uploaded')} $successCount',
-        const Color(0xFF00E5FF),
-      );
-      await _silentRefresh();
-      await _refreshUserDataFromServer();
+      if (await FileSystemEntity.isDirectory(path)) {
+        _setProcessing(
+          true,
+          tr(context, 'scanning_folder') ?? 'Сканування папки...',
+        );
+
+        int fileCount = 0;
+        await for (var entity in Directory(
+          path,
+        ).list(recursive: true, followLinks: false)) {
+          if (entity is File) {
+            final fileName = p.basename(entity.path);
+            if (fileName == '.DS_Store' ||
+                fileName == 'desktop.ini' ||
+                fileName == 'Thumbs.db')
+              continue;
+            fileCount++;
+          }
+        }
+
+        setState(() {
+          _totalQueueFiles += fileCount;
+          _showUploadQueue = true;
+        });
+
+        _setProcessing(
+          true,
+          tr(context, 'creating_folder') ?? 'Створення структури...',
+        );
+        await _buildStructureAndEnqueue(Directory(path), _currentFolderId);
+
+        _setProcessing(false);
+        await _silentRefresh();
+      } else if (await FileSystemEntity.isFile(path)) {
+        setState(() {
+          _totalQueueFiles += 1;
+          _showUploadQueue = true;
+        });
+        _enqueueFile(
+          File(path),
+          p.basename(path),
+          _currentFolderId,
+          isFolder: false,
+        );
+      }
     }
   }
 
-  Future<void> _uploadDirectory(Directory dir, String parentFolderId) async {
+  Future<void> _buildStructureAndEnqueue(
+    Directory dir,
+    String parentFolderId,
+  ) async {
     final dirName = p.basename(dir.path);
     final newFolderId = await _vfsManager.createFolder(dirName, parentFolderId);
     if (newFolderId == null) return;
 
-    final entities = await dir.list().toList();
+    final entities = await dir.list(followLinks: false).toList();
+
     for (var entity in entities) {
+      final fileName = p.basename(entity.path);
+      if (fileName == '.DS_Store' ||
+          fileName == 'desktop.ini' ||
+          fileName == 'Thumbs.db')
+        continue;
+
       if (entity is Directory) {
-        await _uploadDirectory(entity, newFolderId);
+        await _buildStructureAndEnqueue(entity, newFolderId);
       } else if (entity is File) {
-        final fileName = p.basename(entity.path);
-        await _uploadLocalFile(entity, fileName, newFolderId);
+        _enqueueFile(File(entity.path), fileName, newFolderId, isFolder: false);
       }
     }
   }
@@ -368,7 +440,6 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
           encryptedFileKey: encryptedFileKey,
           size: encryptedSize,
         );
-
         return nodeCreated;
       }
     } catch (e) {
@@ -383,13 +454,32 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
     );
     if (result == null || result.files.isEmpty) return;
 
-    int successCount = 0;
     final currentChildren = _vfsManager.getChildren(_currentFolderId);
-    final userMasterKey = await _secureStorage.read(key: 'user_master_key');
-    if (userMasterKey == null) return;
 
     for (var platformFile in result.files) {
       if (platformFile.path == null) continue;
+
+      final file = File(platformFile.path!);
+      final int originalSize = await file.length();
+
+      if (_currentUserData != null) {
+        final double limitBytes =
+            (_currentUserData!.storageLimitMb ?? 500) * 1024 * 1024;
+        final double usedBytes =
+            (_currentUserData!.storageUsedMb ?? 0.0) * 1024 * 1024;
+        final double freeBytes = limitBytes - usedBytes;
+        final int encryptedSize = _encryption.calculateEncryptedSize(
+          originalSize,
+        );
+
+        if (encryptedSize > freeBytes) {
+          _showSnackBar(
+            '${tr(context, 'notEnoughSpace')}: ${platformFile.name}',
+            Colors.orangeAccent,
+          );
+          continue;
+        }
+      }
 
       bool fileExists = currentChildren.any(
         (n) => !n.isFolder && n.name == platformFile.name,
@@ -428,20 +518,117 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
         if (!proceed) continue;
       }
 
-      _setProcessing(
-        true,
-        "${tr(context, 'uploading')} ${platformFile.name}...",
+      setState(() {
+        _totalQueueFiles += 1;
+      });
+      _enqueueFile(file, platformFile.name, _currentFolderId);
+    }
+    _clearSelection();
+  }
+
+  void _enqueueFile(
+    File file,
+    String fileName,
+    String targetFolderId, {
+    bool isFolder = false,
+  }) {
+    final task = UploadTask(
+      id: _uuid.v4(),
+      fileName: fileName,
+      isFolder: isFolder,
+    );
+
+    setState(() {
+      _uploadTasks.add(task);
+      _showUploadQueue = true;
+    });
+
+    _uploadQueue.add({
+      'file': file,
+      'fileName': fileName,
+      'targetFolderId': targetFolderId,
+      'task': task,
+    });
+
+    _processNextInQueue();
+  }
+
+  Future<void> _processNextInQueue() async {
+    if (_uploadQueue.isEmpty || _activeUploads >= _maxConcurrentUploads) return;
+
+    _activeUploads++;
+    final item = _uploadQueue.removeAt(0);
+
+    try {
+      await _executeBackgroundUpload(
+        item['file'],
+        item['fileName'],
+        item['targetFolderId'],
+        item['task'],
       );
-      File file = File(platformFile.path!);
-      String fileId = _uuid.v4();
-      final rawFileKey = _encryption.generateRandomKey();
+    } finally {
+      _activeUploads--;
+      if (mounted) {
+        setState(() {
+          _completedQueueFiles++;
+        });
+      }
+      _processNextInQueue();
+    }
+  }
+
+  Stream<List<int>> _wrapStreamWithProgress(
+    Stream<List<int>> source,
+    int totalSize,
+    UploadTask task,
+  ) async* {
+    int bytesUploaded = 0;
+    await for (final chunk in source) {
+      bytesUploaded += chunk.length;
+      if (mounted) {
+        setState(() {
+          task.progress = totalSize > 0 ? bytesUploaded / totalSize : 0;
+        });
+      }
+      yield chunk;
+    }
+  }
+
+  Future<void> _executeBackgroundUpload(
+    File file,
+    String fileName,
+    String targetFolderId,
+    UploadTask task,
+  ) async {
+    const int maxAttempts = 3;
+    int attempt = 0;
+    bool success = false;
+
+    while (attempt < maxAttempts && !success) {
+      attempt++;
 
       try {
+        final userMasterKey = await _secureStorage.read(key: 'user_master_key');
+        if (userMasterKey == null) throw Exception("Master key not found");
+
+        if (attempt > 1) {
+          if (mounted)
+            setState(() => task.errorMessage = "Retry attempt $attempt...");
+          await Future.delayed(Duration(seconds: attempt * 2));
+        }
+
+        String fileId = _uuid.v4();
+        final rawFileKey = _encryption.generateRandomKey();
         final originalSize = await file.length();
         final encryptedSize = _encryption.calculateEncryptedSize(originalSize);
-        final fileStream = file.openRead();
+
+        final progressStream = _wrapStreamWithProgress(
+          file.openRead(),
+          originalSize,
+          task,
+        );
         final encryptedStream = _encryption.encryptStreamWithKey(
-          fileStream,
+          progressStream,
           rawFileKey,
         );
 
@@ -458,38 +645,41 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
             userMasterKey,
           );
 
-          bool nodeCreated = await _vfsManager.addFileNode(
+          success = await _vfsManager.addFileNode(
             fileId,
-            platformFile.name,
-            _currentFolderId,
+            fileName,
+            targetFolderId,
             encryptedFileKey: encryptedFileKey,
             size: encryptedSize,
           );
+        }
 
-          if (nodeCreated) {
-            successCount++;
-          }
+        if (success && mounted) {
+          setState(() {
+            task.isUploading = false;
+            task.isSuccess = true;
+            task.errorMessage = null;
+          });
+          _silentRefresh();
+          _refreshUserDataFromServer();
         }
       } catch (e) {
-        _showSnackBar(
-          '${tr(context, 'upload_error')} ${platformFile.name}',
-          Colors.redAccent,
-        );
+        print('[ATTEMPT $attempt FAILED] $e');
+
+        if (attempt >= maxAttempts) {
+          if (mounted) {
+            setState(() {
+              task.isUploading = false;
+              task.isError = true;
+              task.errorMessage = e.toString().replaceAll('Exception: ', '');
+            });
+          }
+        }
       }
     }
-
-    _setProcessing(false);
-    if (successCount > 0) {
-      _showSnackBar(
-        '${tr(context, 'files_uploaded')} $successCount',
-        const Color(0xFF00E5FF),
-      );
-      await _silentRefresh();
-      await _refreshUserDataFromServer();
-    }
-    _clearSelection();
   }
 
+  // MARK: - DOWNLOAD LOGIC
   Future<void> _downloadNodes(List<VfsNode> nodes) async {
     final filesToDownload = nodes.where((n) => !n.isFolder).toList();
     if (filesToDownload.isEmpty) return;
@@ -501,14 +691,16 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
       try {
         if (node.encryptedFileKey == null || userMasterKey == null) continue;
         String? savePath = await FilePicker.platform.saveFile(
-          dialogTitle: 'Save ${node.name}',
+          dialogTitle: '${tr(context, 'save_file')} ${node.name}',
           fileName: node.name,
         );
         if (savePath != null) {
           final url = await _storageService.getFileDownloadUrl(node.id);
           if (url != null) {
             final request = http.Request('GET', Uri.parse(url));
-            final streamedResponse = await http.Client().send(request);
+            final streamedResponse = await http.Client()
+                .send(request)
+                .timeout(const Duration(seconds: 60));
             if (streamedResponse.statusCode == 200) {
               final rawFileKey = await _encryption.decryptTextWithKey(
                 node.encryptedFileKey!,
@@ -744,9 +936,9 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
     _setProcessing(true, tr(context, 'importing_file'));
     try {
       final userMasterKey = await _secureStorage.read(key: 'user_master_key');
-      final response = await http.Client().send(
-        http.Request('GET', Uri.parse(url)),
-      );
+      final response = await http.Client()
+          .send(http.Request('GET', Uri.parse(url)))
+          .timeout(const Duration(seconds: 60));
 
       if (response.statusCode == 200) {
         final newFileId = _uuid.v4();
@@ -813,9 +1005,9 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
       final userMasterKey = await _secureStorage.read(key: 'user_master_key');
       if (userMasterKey == null) throw Exception("Master key not found");
 
-      final response = await http.Client().send(
-        http.Request('GET', Uri.parse(fileUrl)),
-      );
+      final response = await http.Client()
+          .send(http.Request('GET', Uri.parse(fileUrl)))
+          .timeout(const Duration(seconds: 60));
       if (response.statusCode == 200) {
         final newFileId = _uuid.v4();
         final newRawKey = _encryption.generateRandomKey();
@@ -891,9 +1083,9 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
         );
         if (fileUrl == null) continue;
 
-        final response = await http.Client().send(
-          http.Request('GET', Uri.parse(fileUrl)),
-        );
+        final response = await http.Client()
+            .send(http.Request('GET', Uri.parse(fileUrl)))
+            .timeout(const Duration(seconds: 60));
         if (response.statusCode == 200) {
           final newFileId = _uuid.v4();
           final newRawKey = _encryption.generateRandomKey();
@@ -1080,8 +1272,13 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
     }
   }
 
-  void _clearSelection() => setState(() => _selectedIds.clear());
+  void _clearSelection() {
+    if (!mounted) return;
+    setState(() => _selectedIds.clear());
+  }
+
   void _toggleSelection(String id) {
+    if (!mounted) return;
     setState(() {
       _selectedIds.contains(id)
           ? _selectedIds.remove(id)
@@ -1114,6 +1311,7 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
   }
 
   void _setProcessing(bool isProcessing, [String text = ""]) {
+    if (!mounted) return;
     setState(() {
       _isProcessing = isProcessing;
       _processText = text;
@@ -1121,18 +1319,15 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
   }
 
   void _showSnackBar(String message, Color color) {
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(message, style: const TextStyle(color: Colors.white)),
-          backgroundColor:
-              color == const Color(0xFF00E5FF)
-                  ? const Color(0xFF00BFA5)
-                  : color,
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(message, style: const TextStyle(color: Colors.white)),
+        backgroundColor:
+            color == const Color(0xFF00E5FF) ? const Color(0xFF00BFA5) : color,
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
   }
 
   // MARK: - THEMING
@@ -1248,6 +1443,11 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
                                       child: _buildFloatingImportField(context),
                                     ),
                                   ),
+                                Positioned(
+                                  bottom: 24.0,
+                                  left: 24.0,
+                                  child: _buildUploadManagerOverlay(),
+                                ),
                               ],
                             ),
                           ),
@@ -1268,7 +1468,270 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
     );
   }
 
-  // MARK: - UI COMPONENTS (AppBar, Sidebar, Tabs)
+  // MARK: - UI COMPONENTS (OVERLAYS AND FLOATING ELEMENTS)
+  Widget _buildUploadManagerOverlay() {
+    if (!_showUploadQueue || _uploadTasks.isEmpty)
+      return const SizedBox.shrink();
+
+    int activeCount = _uploadTasks.where((t) => t.isUploading).length;
+    bool isAllDone = activeCount == 0 && _uploadQueue.isEmpty;
+    double globalProgress =
+        _totalQueueFiles > 0
+            ? (_completedQueueFiles / _totalQueueFiles).clamp(0.0, 1.0)
+            : 0.0;
+
+    return Container(
+      width: 320,
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1D24),
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.5),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+        border: Border.all(color: Colors.white12),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Material(
+            color: const Color(0xFF23272A),
+            borderRadius:
+                _isUploadQueueMinimized
+                    ? BorderRadius.circular(12)
+                    : const BorderRadius.vertical(top: Radius.circular(12)),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap:
+                  () => setState(
+                    () => _isUploadQueueMinimized = !_isUploadQueueMinimized,
+                  ),
+              child: Column(
+                children: [
+                  Padding(
+                    padding: const EdgeInsets.only(
+                      left: 16,
+                      right: 4,
+                      top: 4,
+                      bottom: 4,
+                    ),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            isAllDone
+                                ? tr(context, 'upload_complete')
+                                : '${tr(context, 'uploading')} ($_completedQueueFiles/$_totalQueueFiles)',
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                        IconButton(
+                          icon: Icon(
+                            _isUploadQueueMinimized
+                                ? Icons.keyboard_arrow_up
+                                : Icons.keyboard_arrow_down,
+                            color: Colors.white54,
+                          ),
+                          onPressed:
+                              () => setState(
+                                () =>
+                                    _isUploadQueueMinimized =
+                                        !_isUploadQueueMinimized,
+                              ),
+                        ),
+                        IconButton(
+                          icon: const Icon(
+                            Icons.close,
+                            color: Colors.white54,
+                            size: 20,
+                          ),
+                          onPressed: () {
+                            setState(() {
+                              _showUploadQueue = false;
+                              _uploadQueue.clear();
+                              _uploadTasks.removeWhere((t) => !t.isUploading);
+                              _totalQueueFiles = 0;
+                              _completedQueueFiles = 0;
+                            });
+                          },
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (!isAllDone)
+                    LinearProgressIndicator(
+                      value: globalProgress,
+                      backgroundColor: Colors.white12,
+                      valueColor: const AlwaysStoppedAnimation<Color>(
+                        Color(0xFF00E5FF),
+                      ),
+                      minHeight: 2,
+                    ),
+                ],
+              ),
+            ),
+          ),
+          if (!_isUploadQueueMinimized)
+            Container(
+              constraints: const BoxConstraints(maxHeight: 250),
+              child: ListView.builder(
+                shrinkWrap: true,
+                padding: EdgeInsets.zero,
+                itemCount: _uploadTasks.length,
+                itemBuilder: (context, index) {
+                  final task = _uploadTasks[_uploadTasks.length - 1 - index];
+                  return ListTile(
+                    dense: true,
+                    leading: Icon(
+                      task.isFolder == true
+                          ? Icons.folder_outlined
+                          : Icons.insert_drive_file_outlined,
+                      color: Colors.white54,
+                      size: 20,
+                    ),
+                    title: Text(
+                      task.fileName,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(color: Colors.white, fontSize: 12),
+                    ),
+                    subtitle:
+                        task.isUploading
+                            ? Padding(
+                              padding: const EdgeInsets.only(top: 4.0),
+                              child: LinearProgressIndicator(
+                                value: task.progress,
+                                backgroundColor: Colors.white10,
+                                valueColor: const AlwaysStoppedAnimation<Color>(
+                                  Color(0xFF00E5FF),
+                                ),
+                                minHeight: 2,
+                              ),
+                            )
+                            : Text(
+                              task.isSuccess
+                                  ? tr(context, 'done')
+                                  : (task.errorMessage ?? tr(context, 'error')),
+                              style: TextStyle(
+                                color:
+                                    task.isSuccess
+                                        ? Colors.green
+                                        : Colors.redAccent,
+                                fontSize: 10,
+                              ),
+                            ),
+                    trailing:
+                        task.isUploading
+                            ? const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  Color(0xFF00E5FF),
+                                ),
+                              ),
+                            )
+                            : Icon(
+                              task.isSuccess ? Icons.check_circle : Icons.error,
+                              color:
+                                  task.isSuccess
+                                      ? Colors.green
+                                      : Colors.redAccent,
+                              size: 18,
+                            ),
+                  );
+                },
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  void _showHelpDialog() {
+    showDialog(
+      context: context,
+      builder:
+          (context) => AlertDialog(
+            backgroundColor: const Color(0xFF1A1D24),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            title: Row(
+              children: [
+                const Icon(Icons.help_outline, color: Color(0xFF00E5FF)),
+                const SizedBox(width: 10),
+                Text(
+                  tr(context, 'help_support'),
+                  style: const TextStyle(color: Colors.white),
+                ),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  tr(context, 'upload_problems'),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _buildHelpStep(tr(context, 'help_step_1')),
+                _buildHelpStep(tr(context, 'help_step_2')),
+                _buildHelpStep(tr(context, 'help_step_3')),
+                const SizedBox(height: 16),
+                const Divider(color: Colors.white10),
+                const SizedBox(height: 8),
+                Text(
+                  tr(context, 'contact_dev'),
+                  style: const TextStyle(color: Colors.white70, fontSize: 12),
+                ),
+                const SizedBox(height: 4),
+                const SelectableText(
+                  "support@boardly.studio",
+                  style: TextStyle(
+                    color: Color(0xFF00E5FF),
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: Text(
+                  tr(context, 'close_btn'),
+                  style: const TextStyle(color: Colors.white54),
+                ),
+              ),
+            ],
+          ),
+    );
+  }
+
+  Widget _buildHelpStep(String text) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Text(
+        text,
+        style: const TextStyle(color: Colors.white60, fontSize: 13),
+      ),
+    );
+  }
+
+  // MARK: - UI COMPONENTS (APPBAR AND TABS)
   AppBar _buildAppBar(BuildContext context) {
     if (_isSelectionMode) {
       return AppBar(
@@ -1320,10 +1783,30 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
                 onPressed: () => _navigateBack(),
               ),
       actions: [
+        TextButton.icon(
+          onPressed: _isProcessing ? null : _showWipeConfirmationDialog,
+          icon: const Icon(
+            Icons.warning_amber_rounded,
+            color: Colors.redAccent,
+            size: 18,
+          ),
+          label: Text(
+            tr(context, 'wipe_all_btn'),
+            style: const TextStyle(
+              color: Colors.redAccent,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ),
         IconButton(
           icon: const Icon(Icons.delete_outline),
           tooltip: tr(context, 'trash'),
           onPressed: _isProcessing ? null : _showTrashSheet,
+        ),
+        IconButton(
+          icon: const Icon(Icons.help_outline),
+          tooltip: tr(context, 'help_support'),
+          onPressed: _showHelpDialog,
         ),
         PopupMenuButton<String>(
           icon: const Icon(Icons.language),
@@ -1345,6 +1828,7 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
           tooltip: tr(context, 'profile'),
           onSelected: (value) {
             if (value == 'logout') _logout();
+            if (value == 'delete_account') _showDeleteAccountDialog();
           },
           itemBuilder:
               (BuildContext context) => <PopupMenuEntry<String>>[
@@ -1369,12 +1853,30 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
                     children: [
                       const Icon(
                         Icons.exit_to_app,
-                        color: Colors.redAccent,
+                        color: Colors.white70,
                         size: 20,
                       ),
                       const SizedBox(width: 8),
                       Text(
                         tr(context, 'logout'),
+                        style: const TextStyle(color: Colors.white),
+                      ),
+                    ],
+                  ),
+                ),
+                const PopupMenuDivider(),
+                PopupMenuItem<String>(
+                  value: 'delete_account',
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.person_remove,
+                        color: Colors.redAccent,
+                        size: 20,
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        tr(context, 'delete_account'),
                         style: const TextStyle(color: Colors.redAccent),
                       ),
                     ],
@@ -1449,6 +1951,7 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
     );
   }
 
+  // MARK: - UI COMPONENTS (SIDEBAR AND STORAGE)
   Widget _buildSidebar(BuildContext context) {
     return Container(
       width: 280,
@@ -1826,7 +2329,6 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
     );
   }
 
-  // MARK: - UI COMPONENTS (Overlays, Floating Elements)
   Widget _buildDragOverlay() {
     return Container(
       color: const Color(0xFF15181E).withOpacity(0.85),
@@ -1848,7 +2350,7 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
             ),
             const SizedBox(height: 24),
             Text(
-              tr(context, 'drop_to_upload') ?? 'Відпустіть для завантаження',
+              tr(context, 'drop_to_upload'),
               style: const TextStyle(
                 fontSize: 24,
                 fontWeight: FontWeight.bold,
@@ -1857,8 +2359,7 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
             ),
             const SizedBox(height: 8),
             Text(
-              tr(context, 'folders_supported') ??
-                  'Підтримуються файли та цілі папки',
+              tr(context, 'folders_supported'),
               style: const TextStyle(fontSize: 14, color: Colors.white70),
             ),
           ],
@@ -2008,7 +2509,7 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
     );
   }
 
-  // MARK: - UI COMPONENTS (Dialogs & Sheets)
+  // MARK: - UI COMPONENTS (DIALOGS AND SHEETS)
   void _showTrashSheet() async {
     _setProcessing(true, tr(context, 'processing'));
     final trashData = await _getTrashItems();
@@ -2119,6 +2620,238 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
         );
       },
     );
+  }
+
+  Future<void> _showWipeConfirmationDialog() async {
+    final TextEditingController deleteController = TextEditingController();
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF1A1D24),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          title: Row(
+            children: [
+              const Icon(Icons.warning_amber_rounded, color: Colors.redAccent),
+              const SizedBox(width: 12),
+              Text(
+                tr(context, 'wipe_all_title'),
+                style: const TextStyle(color: Colors.white),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                tr(context, 'wipe_all_desc'),
+                style: const TextStyle(color: Colors.white70),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: deleteController,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  hintText: tr(context, 'type_delete_to_confirm'),
+                  hintStyle: const TextStyle(color: Colors.white38),
+                  focusedBorder: OutlineInputBorder(
+                    borderSide: const BorderSide(color: Colors.redAccent),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderSide: const BorderSide(color: Colors.white12),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: Text(
+                tr(context, 'cancel'),
+                style: const TextStyle(color: Colors.white54),
+              ),
+            ),
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: deleteController,
+              builder: (context, value, child) {
+                final isConfirmed = value.text.trim() == 'DELETE';
+                return ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.redAccent,
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor: Colors.redAccent.withOpacity(0.3),
+                    disabledForegroundColor: Colors.white38,
+                  ),
+                  onPressed:
+                      isConfirmed ? () => Navigator.pop(context, true) : null,
+                  child: Text(tr(context, 'wipe_all_confirm')),
+                );
+              },
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirm == true) {
+      _executeWipe();
+    }
+  }
+
+  Future<void> _executeWipe() async {
+    _setProcessing(true, tr(context, 'wiping_data'));
+
+    final success = await _storageService.wipeAllData();
+
+    if (success) {
+      await _secureStorage.delete(key: 'user_master_key');
+
+      if (mounted) {
+        setState(() {
+          _needsKeySetup = true;
+          _pathStack.removeRange(1, _pathStack.length);
+          _selectedIds.clear();
+        });
+      }
+
+      await _refreshUserDataFromServer();
+      _showSnackBar(tr(context, 'wipe_success'), const Color(0xFF00BFA5));
+    } else {
+      _showSnackBar(tr(context, 'wipe_error'), Colors.redAccent);
+    }
+
+    _setProcessing(false);
+  }
+
+  Future<void> _showDeleteAccountDialog() async {
+    final TextEditingController deleteController = TextEditingController();
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF1A1D24),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+          ),
+          title: Row(
+            children: [
+              const Icon(Icons.person_remove, color: Colors.redAccent),
+              const SizedBox(width: 12),
+              Text(
+                tr(context, 'delete_account_title'),
+                style: const TextStyle(color: Colors.white),
+              ),
+            ],
+          ),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                tr(context, 'delete_account_desc'),
+                style: const TextStyle(color: Colors.white70),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: deleteController,
+                style: const TextStyle(color: Colors.white),
+                decoration: InputDecoration(
+                  hintText: tr(context, 'type_delete_to_confirm'),
+                  hintStyle: const TextStyle(color: Colors.white38),
+                  focusedBorder: OutlineInputBorder(
+                    borderSide: const BorderSide(color: Colors.redAccent),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderSide: const BorderSide(color: Colors.white12),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: Text(
+                tr(context, 'cancel'),
+                style: const TextStyle(color: Colors.white54),
+              ),
+            ),
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: deleteController,
+              builder: (context, value, child) {
+                final isConfirmed = value.text.trim() == 'DELETE';
+                return ElevatedButton(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.redAccent,
+                    foregroundColor: Colors.white,
+                    disabledBackgroundColor: Colors.redAccent.withOpacity(0.3),
+                    disabledForegroundColor: Colors.white38,
+                  ),
+                  onPressed:
+                      isConfirmed ? () => Navigator.pop(context, true) : null,
+                  child: Text(tr(context, 'delete') ?? 'Delete'),
+                );
+              },
+            ),
+          ],
+        );
+      },
+    );
+
+    if (confirm == true) {
+      _executeDeleteAccount();
+    }
+  }
+
+  Future<void> _executeDeleteAccount() async {
+    _setProcessing(
+      true,
+      tr(context, 'deleting_account') ?? 'Deleting account & data...',
+    );
+
+    try {
+      await _storageService.wipeAllData();
+      final client = AuthHttpClient();
+      final response = await client.request(
+        Uri.parse('https://api.boardly.studio/user/delete'),
+        method: 'DELETE',
+      );
+      client.close();
+
+      if (response.statusCode == 200) {
+        await _secureStorage.delete(key: 'user_master_key');
+        await AuthStorage.clearAll();
+
+        if (mounted) {
+          _showSnackBar(
+            tr(context, 'account_deleted_success') ?? 'Акаунт успішно видалено',
+            const Color(0xFF00BFA5),
+          );
+          Navigator.of(context).pushReplacement(
+            MaterialPageRoute(builder: (_) => const AuthScreen()),
+          );
+        }
+      } else {
+        _showSnackBar(
+          '${tr(context, 'error')} ${response.statusCode}',
+          Colors.redAccent,
+        );
+      }
+    } catch (e) {
+      _showSnackBar('${tr(context, 'error')}: $e', Colors.redAccent);
+    } finally {
+      if (mounted) _setProcessing(false);
+    }
   }
 
   Widget _buildTrashTile(Map<String, dynamic> item) {
@@ -2643,7 +3376,7 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
     );
   }
 
-  // MARK: - UI COMPONENTS (Vault Setup Screens)
+  // MARK: - UI COMPONENTS (VAULT SETUP SCREENS)
   Widget _buildKeySetupScreen(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     return Scaffold(
@@ -3079,4 +3812,28 @@ class _CloudStorageScreenState extends State<CloudStorageScreen>
       ),
     );
   }
+}
+
+// MARK: - HELPER CLASSES
+
+class UploadTask {
+  final String id;
+  final String fileName;
+  final bool isFolder;
+  double progress;
+  bool isUploading;
+  bool isSuccess;
+  bool isError;
+  String? errorMessage;
+
+  UploadTask({
+    required this.id,
+    required this.fileName,
+    this.isFolder = false,
+    this.progress = 0.0,
+    this.isUploading = true,
+    this.isSuccess = false,
+    this.isError = false,
+    this.errorMessage,
+  });
 }

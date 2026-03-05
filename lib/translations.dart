@@ -147,6 +147,44 @@ const Map<String, Map<String, String>> _translations = {
     'logout': 'Вийти',
     'loading': 'Завантаження...',
     'selected': 'вибрано',
+
+    'forgot_password': 'Забули пароль?',
+    'reset_password': 'Відновлення пароля',
+    'new_password': 'Новий пароль',
+    'resend_code': 'Надіслати код ще раз',
+
+    'upload_complete': 'Завантаження завершено',
+    'expand': 'Розгорнути',
+    'collapse': 'Згорнути',
+    'done': 'Готово',
+    'wipe_all_btn': 'Видалити все',
+    'wipe_all_title': 'Видалити все',
+    'wipe_all_desc':
+        'Ви збираєтесь повністю видалити ВСІ свої файли, папки та налаштування сховища з хмари. Цю дію неможливо скасувати.\n\nПісля цього вам доведеться створити нове сховище.',
+    'wipe_all_confirm': 'Так, видалити все',
+    'wiping_data': 'Видалення всіх даних...',
+    'wipe_success': 'Сховище очищено. Створіть нове.',
+    'wipe_error': 'Помилка очищення',
+    'drop_to_upload': 'Відпустіть для завантаження',
+    'folders_supported': 'Підтримуються файли та цілі папки',
+    'save_file': 'Зберегти',
+    'type_delete_to_confirm': 'Введіть DELETE для підтвердження',
+
+    // Account Deletion
+    'delete_account': 'Видалити акаунт',
+    'delete_account_title': 'Видалення акаунту',
+    'delete_account_desc':
+        'Ця дія є незворотною. Усі ваші файли, налаштування безпеки та сам акаунт будуть назавжди видалені з наших серверів.',
+    'deleting_account': 'Видалення акаунту та даних...',
+    'account_deleted_success': 'Акаунт успішно видалено',
+
+    // Help & Support
+    'help_support': 'Допомога та підтримка',
+    'upload_problems': 'Проблеми із завантаженням?',
+    'help_step_1': '1. Перевірте інтернет-з\'єднання.',
+    'help_step_2': '2. Вимкніть антивірус або додайте Faby у виключення.',
+    'help_step_3': '3. Переконайтеся, що час на ПК синхронізовано.',
+    'contact_dev': 'Зв\'язок з розробником:',
   },
   'en': {
     // Auth & Main
@@ -286,6 +324,44 @@ const Map<String, Map<String, String>> _translations = {
     'logout': 'Log Out',
     'loading': 'Loading...',
     'selected': 'selected',
+
+    'forgot_password': 'Forgot password?',
+    'reset_password': 'Reset Password',
+    'new_password': 'New password',
+    'resend_code': 'Resend code',
+
+    'upload_complete': 'Upload complete',
+    'expand': 'Expand',
+    'collapse': 'Collapse',
+    'done': 'Done',
+    'wipe_all_btn': 'Wipe All',
+    'wipe_all_title': 'Wipe All Data',
+    'wipe_all_desc':
+        'You are about to completely delete ALL your files, folders, and vault settings from the cloud. This action cannot be undone.\n\nYou will need to create a new vault afterward.',
+    'wipe_all_confirm': 'Yes, wipe everything',
+    'wiping_data': 'Wiping all data...',
+    'wipe_success': 'Vault wiped. Create a new one.',
+    'wipe_error': 'Wipe error',
+    'drop_to_upload': 'Drop to upload',
+    'folders_supported': 'Files and entire folders are supported',
+    'save_file': 'Save',
+    'type_delete_to_confirm': 'Type DELETE to confirm',
+
+    // Account Deletion
+    'delete_account': 'Delete Account',
+    'delete_account_title': 'Delete Account',
+    'delete_account_desc':
+        'This action is irreversible. All your files, security settings, and the account itself will be permanently deleted from our servers.',
+    'deleting_account': 'Deleting account & data...',
+    'account_deleted_success': 'Account successfully deleted',
+
+    // Help & Support
+    'help_support': 'Help & Support',
+    'upload_problems': 'Upload problems?',
+    'help_step_1': '1. Check your internet connection.',
+    'help_step_2': '2. Disable antivirus or add Faby to exceptions.',
+    'help_step_3': '3. Ensure your PC time is synchronized.',
+    'contact_dev': 'Contact developer:',
   },
   'de': {
     // Auth & Main
@@ -429,5 +505,45 @@ const Map<String, Map<String, String>> _translations = {
     'logout': 'Abmelden',
     'loading': 'Wird geladen...',
     'selected': 'ausgewählt',
+
+    'forgot_password': 'Passwort vergessen?',
+    'reset_password': 'Passwort zurücksetzen',
+    'new_password': 'Neues Passwort',
+    'resend_code': 'Code erneut senden',
+
+    'upload_complete': 'Upload abgeschlossen',
+    'expand': 'Erweitern',
+    'collapse': 'Minimieren',
+    'done': 'Fertig',
+    'wipe_all_btn': 'Alles löschen',
+    'wipe_all_title': 'Alles löschen',
+    'wipe_all_desc':
+        'Sie sind im Begriff, ALLE Ihre Dateien, Ordner und Tresoreinstellungen vollständig aus der Cloud zu löschen. Diese Aktion kann nicht rückgängig gemacht werden.\n\nDanach müssen Sie einen neuen Tresor erstellen.',
+    'wipe_all_confirm': 'Ja, alles löschen',
+    'wiping_data': 'Alle Daten werden gelöscht...',
+    'wipe_success': 'Tresor gelöscht. Erstellen Sie einen neuen.',
+    'wipe_error': 'Fehler beim Löschen',
+    'drop_to_upload': 'Zum Hochladen loslassen',
+    'folders_supported': 'Dateien und ganze Ordner werden unterstützt',
+    'save_file': 'Speichern',
+    'type_delete_to_confirm': 'Geben Sie DELETE ein, um zu bestätigen',
+
+    // Account Deletion
+    'delete_account': 'Konto löschen',
+    'delete_account_title': 'Konto löschen',
+    'delete_account_desc':
+        'Diese Aktion ist unwiderruflich. Alle Ihre Dateien, Sicherheitseinstellungen und das Konto selbst werden dauerhaft von unseren Servern gelöscht.',
+    'deleting_account': 'Konto und Daten werden gelöscht...',
+    'account_deleted_success': 'Konto erfolgreich gelöscht',
+
+    // Help & Support
+    'help_support': 'Hilfe & Support',
+    'upload_problems': 'Probleme beim Hochladen?',
+    'help_step_1': '1. Überprüfen Sie Ihre Internetverbindung.',
+    'help_step_2':
+        '2. Deaktivieren Sie das Antivirenprogramm oder fügen Sie Faby zu den Ausnahmen hinzu.',
+    'help_step_3':
+        '3. Stellen Sie sicher, dass Ihre PC-Zeit synchronisiert ist.',
+    'contact_dev': 'Entwickler kontaktieren:',
   },
 };

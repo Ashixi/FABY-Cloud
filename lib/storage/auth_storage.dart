@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-import 'package:boardly_cloud/models/user_data.dart';
+import 'package:faby/models/user_data.dart';
 
 class AuthStorage {
   // MARK: - KEYS & CONFIG

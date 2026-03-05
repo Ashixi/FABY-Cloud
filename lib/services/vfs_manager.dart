@@ -1,12 +1,19 @@
+import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:collection';
+import 'package:http/http.dart' as http;
 import 'package:uuid/uuid.dart';
 import 'package:sqflite/sqflite.dart';
 import 'package:path/path.dart';
 import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
-import 'package:boardly_cloud/models/vfs_node.dart';
-import 'package:boardly_cloud/services/cloudflare_storage_service.dart';
+import 'package:sqlite3_flutter_libs/sqlite3_flutter_libs.dart';
+
+import 'package:faby/models/vfs_node.dart';
+import 'package:faby/services/cloudflare_storage_service.dart';
+import 'package:faby/services/encryption_service.dart';
 
 class VfsManager {
   // MARK: - SINGLETON & CONFIG
@@ -15,64 +22,81 @@ class VfsManager {
   VfsManager._internal();
 
   final _storage = CloudflareStorageService();
+  final _encryption = EncryptionService();
+  final _secureStorage = const FlutterSecureStorage();
   final _uuid = const Uuid();
 
   // MARK: - STATE & CACHE
   Database? _db;
   List<VfsNode> _memoryCache = [];
 
+  Timer? _syncTimer;
+  bool _isUploadingSnapshot = false;
+
   // MARK: - DATABASE INITIALIZATION & MIGRATIONS
   Future<void> initDB() async {
     if (_db != null) return;
 
-    if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
-      sqfliteFfiInit();
-      databaseFactory = databaseFactoryFfi;
-    }
+    try {
+      if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+        sqfliteFfiInit();
+        databaseFactory = databaseFactoryFfi;
+      }
 
-    String path = join(await getDatabasesPath(), 'vfs_cache.db');
-    _db = await openDatabase(
-      path,
-      version: 6,
-      onCreate: (db, version) async {
-        await db.execute('''
-        CREATE TABLE nodes(
-          id TEXT PRIMARY KEY,
-          parentId TEXT,
-          name TEXT,
-          isFolder INTEGER,
-          isFavorite INTEGER DEFAULT 0,
-          size INTEGER,
-          etag TEXT,
-          encryptedFileKey TEXT,
-          shareId TEXT,
-          shareKey TEXT, 
-          encryptedShareKey TEXT
-        )
-      ''');
-      },
-      onUpgrade: (db, oldVersion, newVersion) async {
-        if (oldVersion < 2)
-          await db.execute(
-            'ALTER TABLE nodes ADD COLUMN encryptedFileKey TEXT',
-          );
-        if (oldVersion < 3) {
-          await db.execute('ALTER TABLE nodes ADD COLUMN shareId TEXT');
-          await db.execute('ALTER TABLE nodes ADD COLUMN shareKey TEXT');
-        }
-        if (oldVersion < 4)
-          await db.execute(
-            'ALTER TABLE nodes ADD COLUMN encryptedShareKey TEXT',
-          );
-        if (oldVersion < 5)
-          await db.execute(
-            'ALTER TABLE nodes ADD COLUMN isFavorite INTEGER DEFAULT 0',
-          );
-        if (oldVersion < 6)
-          await db.execute('ALTER TABLE nodes ADD COLUMN size INTEGER');
-      },
-    );
-    await _loadToMemory();
+      String path = join(await getDatabasesPath(), 'vfs_cache.db');
+
+      _db = await openDatabase(
+        path,
+        version: 6,
+        onCreate: (db, version) async {
+          await db.execute('''
+          CREATE TABLE nodes(
+            id TEXT PRIMARY KEY,
+            parentId TEXT,
+            name TEXT,
+            isFolder INTEGER,
+            isFavorite INTEGER DEFAULT 0,
+            size INTEGER,
+            etag TEXT,
+            encryptedFileKey TEXT,
+            shareId TEXT,
+            shareKey TEXT, 
+            encryptedShareKey TEXT
+          )
+        ''');
+        },
+        onUpgrade: (db, oldVersion, newVersion) async {
+          if (oldVersion < 2) {
+            await db.execute(
+              'ALTER TABLE nodes ADD COLUMN encryptedFileKey TEXT',
+            );
+          }
+          if (oldVersion < 3) {
+            await db.execute('ALTER TABLE nodes ADD COLUMN shareId TEXT');
+            await db.execute('ALTER TABLE nodes ADD COLUMN shareKey TEXT');
+          }
+          if (oldVersion < 4) {
+            await db.execute(
+              'ALTER TABLE nodes ADD COLUMN encryptedShareKey TEXT',
+            );
+          }
+          if (oldVersion < 5) {
+            await db.execute(
+              'ALTER TABLE nodes ADD COLUMN isFavorite INTEGER DEFAULT 0',
+            );
+          }
+          if (oldVersion < 6) {
+            await db.execute('ALTER TABLE nodes ADD COLUMN size INTEGER');
+          }
+        },
+      );
+
+      await _loadToMemory();
+      print('[VFS DB] Database initialized successfully.');
+    } catch (e) {
+      print('[VFS DB ERROR] Failed to initialize database: $e');
+      rethrow;
+    }
   }
 
   Future<void> _loadToMemory() async {
@@ -96,23 +120,42 @@ class VfsManager {
   }
 
   // MARK: - DATA GETTERS
-  List<VfsNode> getChildren(String parentId) {
-    return _memoryCache.where((n) => n.parentId == parentId).toList();
-  }
-
+  List<VfsNode> getChildren(String parentId) =>
+      _memoryCache.where((n) => n.parentId == parentId).toList();
   List<VfsNode> get nodes => _memoryCache;
-
   List<VfsNode> get favoriteNodes =>
       _memoryCache.where((n) => n.isFavorite).toList();
 
-  // MARK: - CLOUD SYNC LOGIC
+  // MARK: - VFS V2 CLOUD SYNC LOGIC
   Future<void> sync() async {
     await initDB();
 
+    if ((_syncTimer?.isActive ?? false) || _isUploadingSnapshot) {
+      print(
+        '[VFS SYNC] Скачування скасовано: є локальні зміни, які чекають відправки.',
+      );
+      return;
+    }
+
     try {
       final cloudNodes = await _storage.getCloudNodesMeta();
-      final localNodes = await _db!.query('nodes');
 
+      if (cloudNodes.isNotEmpty) {
+        print('[VFS] Detected V1 nodes. Starting migration to V2...');
+        await _migrateV1toV2(cloudNodes);
+        return;
+      }
+
+      await _downloadVfsSnapshot();
+    } catch (e) {
+      print('[VFS SYNC ERROR] $e');
+    }
+  }
+
+  // MARK: - MIGRATION LOGIC (V1 -> V2)
+  Future<void> _migrateV1toV2(List<Map<String, dynamic>> cloudNodes) async {
+    try {
+      final localNodes = await _db!.query('nodes');
       final localEtags = {
         for (var n in localNodes) n['id'] as String: n['etag'] as String?,
       };
@@ -153,8 +196,7 @@ class VfsManager {
       final idsToDelete =
           localEtags.keys.where((id) {
             final isPending = localEtags[id] == 'pending_sync';
-            final notInCloud = !cloudIds.contains(id);
-            return notInCloud && !isPending;
+            return !cloudIds.contains(id) && !isPending;
           }).toList();
 
       if (idsToDelete.isNotEmpty) {
@@ -166,8 +208,100 @@ class VfsManager {
       }
 
       await _loadToMemory();
+
+      final success = await _uploadVfsSnapshot();
+
+      if (success) {
+        await _storage.upgradeVfsVersion();
+        print('[VFS] Migration to V2 completed successfully!');
+      }
     } catch (e) {
-      print('[VFS SYNC ERROR] $e');
+      print('[VFS MIGRATION ERROR] $e');
+    }
+  }
+
+  // MARK: - SNAPSHOT OPERATIONS
+  Future<bool> _uploadVfsSnapshot() async {
+    if (_db == null || _isUploadingSnapshot) return false;
+    _isUploadingSnapshot = true;
+
+    try {
+      final userMasterKey = await _secureStorage.read(key: 'user_master_key');
+      if (userMasterKey == null) return false;
+
+      final allNodes = await _db!.query('nodes');
+      final jsonString = jsonEncode(allNodes);
+
+      final encryptedBytes = await _encryption.encryptDataWithKey(
+        utf8.encode(jsonString),
+        userMasterKey,
+      );
+
+      final uploadUrl = await _storage.getVfsSnapshotUrl(true);
+      if (uploadUrl == null) return false;
+
+      final response = await http
+          .put(Uri.parse(uploadUrl), body: encryptedBytes)
+          .timeout(const Duration(seconds: 30));
+
+      return response.statusCode == 200;
+    } catch (e) {
+      print('[EXCEPTION] Upload VFS Snapshot: $e');
+      return false;
+    } finally {
+      _isUploadingSnapshot = false;
+    }
+  }
+
+  Future<void> _downloadVfsSnapshot() async {
+    try {
+      final userMasterKey = await _secureStorage.read(key: 'user_master_key');
+      if (userMasterKey == null) return;
+
+      final downloadUrl = await _storage.getVfsSnapshotUrl(false);
+      if (downloadUrl == null) return;
+
+      final response = await http
+          .get(Uri.parse(downloadUrl))
+          .timeout(const Duration(seconds: 30));
+      if (response.statusCode != 200) return;
+
+      final decryptedBytes = await _encryption.decryptDataWithKey(
+        response.bodyBytes,
+        userMasterKey,
+      );
+
+      final String jsonString = utf8.decode(decryptedBytes);
+      final List<dynamic> nodesList = jsonDecode(jsonString);
+
+      await _db!.transaction((txn) async {
+        await txn.delete('nodes');
+        for (var nodeMap in nodesList) {
+          await txn.insert('nodes', nodeMap as Map<String, dynamic>);
+        }
+      });
+
+      await _loadToMemory();
+    } catch (e) {
+      print('[EXCEPTION] Download VFS Snapshot (might be new user): $e');
+    }
+  }
+
+  // MARK: - DEBOUNCED UPLOAD MECHANISM
+  void _triggerDebouncedSync() {
+    if (_syncTimer?.isActive ?? false) {
+      _syncTimer!.cancel();
+    }
+
+    _syncTimer = Timer(const Duration(seconds: 3), () async {
+      await _uploadVfsSnapshot();
+    });
+  }
+
+  Future<void> forceSyncNow() async {
+    if (_syncTimer?.isActive ?? false) {
+      _syncTimer!.cancel();
+      await _uploadVfsSnapshot();
     }
   }
 
@@ -207,23 +341,6 @@ class VfsManager {
     String? shareKey,
     String? encryptedShareKey,
   }) async {
-    final nodeData = {
-      'id': id,
-      'parentId': parentId,
-      'name': name,
-      'isFolder': isFolder,
-      'isFavorite': isFavorite,
-      'size': size,
-      'updatedAt': DateTime.now().millisecondsSinceEpoch,
-      if (encryptedFileKey != null) 'encryptedFileKey': encryptedFileKey,
-      if (shareId != null) 'shareId': shareId,
-      if (shareKey != null) 'shareKey': shareKey,
-      if (encryptedShareKey != null) 'encryptedShareKey': encryptedShareKey,
-    };
-
-    final success = await _storage.uploadNodeJson(id, nodeData);
-    if (!success) return false;
-
     await _db!.insert('nodes', {
       'id': id,
       'parentId': parentId,
@@ -231,7 +348,7 @@ class VfsManager {
       'isFolder': isFolder ? 1 : 0,
       'isFavorite': isFavorite ? 1 : 0,
       'size': size,
-      'etag': 'pending_sync',
+      'etag': 'v2_synced',
       'encryptedFileKey': encryptedFileKey,
       'shareId': shareId,
       'shareKey': shareKey,
@@ -239,6 +356,9 @@ class VfsManager {
     }, conflictAlgorithm: ConflictAlgorithm.replace);
 
     await _loadToMemory();
+
+    _triggerDebouncedSync();
+
     return true;
   }
 
@@ -249,12 +369,6 @@ class VfsManager {
     final node = _memoryCache[index];
     final newFavoriteStatus = !node.isFavorite;
 
-    final nodeData = node.copyWith(isFavorite: newFavoriteStatus).toJson();
-    nodeData['updatedAt'] = DateTime.now().millisecondsSinceEpoch;
-
-    final success = await _storage.uploadNodeJson(nodeId, nodeData);
-    if (!success) return;
-
     await _db!.update(
       'nodes',
       {'isFavorite': newFavoriteStatus ? 1 : 0},
@@ -263,12 +377,15 @@ class VfsManager {
     );
 
     _memoryCache[index] = node.copyWith(isFavorite: newFavoriteStatus);
+
+    _triggerDebouncedSync();
   }
 
   // MARK: - DELETE & SHARE OPERATIONS
   Future<bool> deleteNodes(List<String> initialNodeIds) async {
-    bool allSuccess = true;
     final queue = Queue<String>.from(initialNodeIds);
+    List<Map<String, dynamic>> itemsToDelete = [];
+    List<String> localIdsToRemove = [];
 
     while (queue.isNotEmpty) {
       final id = queue.removeFirst();
@@ -279,19 +396,33 @@ class VfsManager {
 
       if (node.id.isEmpty) continue;
 
+      localIdsToRemove.add(id);
+      itemsToDelete.add({'id': id, 'type': 'node', 'size': 0});
+
       if (node.isFolder) {
         final children = getChildren(id);
         queue.addAll(children.map((c) => c.id));
       } else {
-        await _storage.deleteFile(id);
+        itemsToDelete.add({'id': id, 'type': 'file', 'size': node.size ?? 0});
       }
-
-      await _storage.deleteNode(id);
-      await _db!.delete('nodes', where: 'id = ?', whereArgs: [id]);
     }
 
+    if (itemsToDelete.isEmpty) return true;
+
+    final success = await _storage.logicalDeleteToTrash(itemsToDelete);
+    if (!success) return false;
+
+    await _db!.transaction((txn) async {
+      for (var id in localIdsToRemove) {
+        await txn.delete('nodes', where: 'id = ?', whereArgs: [id]);
+      }
+    });
+
     await _loadToMemory();
-    return allSuccess;
+
+    _triggerDebouncedSync();
+
+    return true;
   }
 
   Future<void> updateNodeShareData(
@@ -306,21 +437,6 @@ class VfsManager {
 
     final node = _memoryCache[index];
 
-    final nodeData = {
-      'id': node.id,
-      'parentId': node.parentId,
-      'name': node.name,
-      'isFolder': node.isFolder,
-      'isFavorite': node.isFavorite,
-      'updatedAt': DateTime.now().millisecondsSinceEpoch,
-      if (node.encryptedFileKey != null)
-        'encryptedFileKey': node.encryptedFileKey,
-      'shareId': shareId,
-      'encryptedShareKey': encryptedShareKey,
-    };
-
-    await _storage.uploadNodeJson(nodeId, nodeData);
-
     await _db!.update(
       'nodes',
       {'shareId': shareId, 'encryptedShareKey': encryptedShareKey},
@@ -333,5 +449,7 @@ class VfsManager {
       encryptedShareKey: encryptedShareKey,
       clearShareData: shareId == null,
     );
+
+    _triggerDebouncedSync();
   }
 }

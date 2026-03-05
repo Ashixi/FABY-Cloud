@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:boardly_cloud/models/vfs_node.dart';
-import 'package:boardly_cloud/services/vfs_manager.dart';
+import 'package:faby/models/vfs_node.dart';
+import 'package:faby/services/vfs_manager.dart';
 import '../translations.dart';
 
 class SideFileManager extends StatefulWidget {

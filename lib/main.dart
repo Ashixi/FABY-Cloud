@@ -1,10 +1,10 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 
-import 'package:boardly_cloud/storage/auth_storage.dart';
-import 'package:boardly_cloud/services/auth_http_client.dart';
-import 'package:boardly_cloud/screens/cloud_storage_screen.dart';
-import 'package:boardly_cloud/models/user_data.dart';
+import 'package:faby/storage/auth_storage.dart';
+import 'package:faby/services/auth_http_client.dart';
+import 'package:faby/screens/cloud_storage_screen.dart';
+import 'package:faby/models/user_data.dart';
 import 'translations.dart';
 
 // MARK: - ENTRY POINT
@@ -85,9 +85,42 @@ class _AuthScreenState extends State<AuthScreen> {
             MaterialPageRoute(builder: (_) => const CloudStorageScreen()),
           );
         }
+      } else {
+        _showError(
+          '${tr(context, 'profile_error')} (Code: ${response.statusCode})',
+        );
       }
     } catch (e) {
       _showError(tr(context, 'profile_error'));
+    }
+  }
+
+  Future<void> _resendCode(String email) async {
+    if (email.isEmpty) {
+      _showError(tr(context, 'email_required') ?? 'Email required');
+      return;
+    }
+
+    setState(() => _isLoading = true);
+    try {
+      final response = await _httpClient.request(
+        Uri.parse("https://api.boardly.studio/auth/request-confirmation"),
+        method: 'POST',
+        headers: {"Content-Type": "application/json"},
+        body: jsonEncode({'email': email}),
+      );
+
+      if (response.statusCode == 200) {
+        _showError(tr(context, 'code_sent'));
+      } else {
+        _showError(
+          "${tr(context, 'auth_error')} ${jsonDecode(response.body)['detail']}",
+        );
+      }
+    } catch (e) {
+      _showError("${tr(context, 'network_error')} $e");
+    } finally {
+      setState(() => _isLoading = false);
     }
   }
 
@@ -119,6 +152,19 @@ class _AuthScreenState extends State<AuthScreen> {
                     prefixIcon: const Icon(Icons.lock),
                   ),
                   obscureText: true,
+                ),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: TextButton(
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      _showForgotPasswordDialog(emailController.text.trim());
+                    },
+                    child: Text(
+                      tr(context, 'forgot_password') ?? 'Forgot password?',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
                 ),
               ],
             ),
@@ -166,6 +212,147 @@ class _AuthScreenState extends State<AuthScreen> {
     );
   }
 
+  void _showForgotPasswordDialog(String initialEmail) {
+    final emailController = TextEditingController(text: initialEmail);
+    final codeController = TextEditingController();
+    final newPasswordController = TextEditingController();
+    bool isCodeSent = false;
+
+    showDialog(
+      context: context,
+      builder:
+          (ctx) => StatefulBuilder(
+            builder: (context, setDialogState) {
+              return AlertDialog(
+                title: Text(tr(context, 'reset_password') ?? 'Reset Password'),
+                content: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (!isCodeSent)
+                      TextField(
+                        controller: emailController,
+                        decoration: InputDecoration(
+                          labelText: tr(context, 'email'),
+                          prefixIcon: const Icon(Icons.email),
+                        ),
+                      )
+                    else ...[
+                      TextField(
+                        controller: codeController,
+                        decoration: InputDecoration(
+                          labelText: tr(context, 'code_hint'),
+                        ),
+                        keyboardType: TextInputType.number,
+                      ),
+                      const SizedBox(height: 16),
+                      TextField(
+                        controller: newPasswordController,
+                        decoration: InputDecoration(
+                          labelText:
+                              tr(context, 'new_password') ?? 'New password',
+                        ),
+                        obscureText: true,
+                      ),
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton(
+                          onPressed:
+                              () => _resendCode(emailController.text.trim()),
+                          child: Text(
+                            tr(context, 'resend_code') ?? 'Resend code',
+                            style: const TextStyle(fontSize: 12),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: Text(tr(context, 'cancel')),
+                  ),
+                  FilledButton(
+                    onPressed: () async {
+                      final email = emailController.text.trim();
+                      if (email.isEmpty) return;
+
+                      if (!isCodeSent) {
+                        setState(() => _isLoading = true);
+                        try {
+                          final response = await _httpClient.request(
+                            Uri.parse(
+                              'https://api.boardly.studio/auth/request-confirmation',
+                            ),
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: jsonEncode({'email': email}),
+                          );
+                          if (response.statusCode == 200) {
+                            setDialogState(() => isCodeSent = true);
+                            _showError(tr(context, 'code_sent'));
+                          } else {
+                            _showError(
+                              "${tr(context, 'error')} ${jsonDecode(response.body)['detail']}",
+                            );
+                          }
+                        } catch (e) {
+                          _showError("${tr(context, 'network_error')} $e");
+                        } finally {
+                          setState(() => _isLoading = false);
+                        }
+                      } else {
+                        final code = codeController.text.trim();
+                        final newPassword = newPasswordController.text;
+                        if (code.isEmpty || newPassword.isEmpty) return;
+
+                        setState(() => _isLoading = true);
+                        try {
+                          final response = await _httpClient.request(
+                            Uri.parse(
+                              'https://api.boardly.studio/auth/reset-password',
+                            ),
+                            method: 'POST',
+                            headers: {'Content-Type': 'application/json'},
+                            body: jsonEncode({
+                              'email': email,
+                              'code': code,
+                              'new_password': newPassword,
+                            }),
+                          );
+
+                          if (response.statusCode == 200) {
+                            Navigator.pop(ctx);
+                            _showError(
+                              tr(context, 'success') ??
+                                  'Password successfully changed',
+                            );
+                          } else {
+                            _showError(
+                              "${tr(context, 'error')} ${jsonDecode(response.body)['detail']}",
+                            );
+                          }
+                        } catch (e) {
+                          _showError("${tr(context, 'network_error')} $e");
+                        } finally {
+                          setState(() => _isLoading = false);
+                        }
+                      }
+                    },
+                    child: Text(
+                      isCodeSent
+                          ? tr(context, 'confirm')
+                          : tr(context, 'get_code'),
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+    );
+  }
+
   Future<void> _showCodeVerificationDialog(
     String email,
     String password,
@@ -178,10 +365,28 @@ class _AuthScreenState extends State<AuthScreen> {
       builder:
           (ctx) => AlertDialog(
             title: Text(tr(context, 'code_title')),
-            content: TextField(
-              controller: codeController,
-              decoration: InputDecoration(labelText: tr(context, 'code_hint')),
-              keyboardType: TextInputType.number,
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: codeController,
+                  decoration: InputDecoration(
+                    labelText: tr(context, 'code_hint'),
+                  ),
+                  keyboardType: TextInputType.number,
+                ),
+                const SizedBox(height: 8),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: TextButton(
+                    onPressed: () => _resendCode(email),
+                    child: Text(
+                      tr(context, 'resend_code') ?? 'Resend code',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ),
+              ],
             ),
             actions: [
               TextButton(
@@ -310,6 +515,18 @@ class _AuthScreenState extends State<AuthScreen> {
                           ),
                           keyboardType: TextInputType.number,
                         ),
+                        const SizedBox(height: 8),
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: TextButton(
+                            onPressed:
+                                () => _resendCode(emailController.text.trim()),
+                            child: Text(
+                              tr(context, 'resend_code') ?? 'Resend code',
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                          ),
+                        ),
                       ],
                     ],
                   ),
@@ -398,8 +615,8 @@ class _AuthScreenState extends State<AuthScreen> {
                             },
                     child: Text(
                       isCodeSent
-                          ? tr(context, 'finish') ?? 'Finish'
-                          : tr(context, 'get_code') ?? 'Get code',
+                          ? (tr(context, 'finish') ?? 'Finish')
+                          : (tr(context, 'get_code') ?? 'Get code'),
                     ),
                   ),
                 ],
@@ -521,7 +738,7 @@ FABY Cloud побудовано на архітектурі "Zero-Knowledge", щ
     );
   }
 
-  // MARK: - UI BUILDERS
+  // MARK: - UI COMPONENTS
   PopupMenuItem<String> _buildLanguageItem(
     String code,
     String flag,
@@ -621,7 +838,6 @@ FABY Cloud побудовано на архітектурі "Zero-Knowledge", щ
                         style: const TextStyle(color: Colors.grey),
                       ),
                       const SizedBox(height: 40),
-
                       if (_isLoading)
                         const CircularProgressIndicator()
                       else ...[
