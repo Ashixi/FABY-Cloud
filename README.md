@@ -37,8 +37,7 @@ FABY Cloud utilizes a robust multi-layered encryption architecture based on **AE
 
 ### 🚀 Key Features
 
-- **Local-First VFS:** The virtual file system is stored locally in an encrypted SQLite database and synced with the cloud using ETags.
-- **Secure File Sharing:** When creating a public share link, the decryption key is embedded in the **URL fragment** (`#key=...`), which is never sent to the server, ensuring secure Client-Side Decryption.
+- **Local-First VFS:** The virtual file system is managed locally via SQLite to ensure top-tier performance and reliable offline availability. While the database maintains the file structure, all sensitive file-decryption keys are strictly encrypted before storage, with the Master Key residing securely in the device's system Secure Storage. Metadata is seamlessly synchronized with the cloud using an ETag-based mechanism.- **Secure File Sharing:** When creating a public share link, the decryption key is embedded in the **URL fragment** (`#key=...`), which is never sent to the server, ensuring secure Client-Side Decryption.
 - **Multipart Uploads:** Supports uploading large files up to 5 GB (platform limit) with chunk management.
 - **Protected Trash:** Deleted files are retained for 7 days. The server supports secure restoration without the risk of overwriting active data.
 
@@ -92,8 +91,7 @@ FABY Cloud використовує потужне багаторівневе ш
 
 ### 🚀 Ключові можливості
 
-- **Local-First VFS:** Віртуальна файлова система зберігається локально в базі даних SQLite (зашифровано). Метадані синхронізуються з хмарою за допомогою ETag.
-- **Secure File Sharing:** При створенні публічного посилання ключ розшифрування вбудовується у **фрагмент URL** (`#key=...`), який ніколи не надсилається на сервер, забезпечуючи безпечний обмін (Client-Side Decryption).
+- **Local-First VFS:** Віртуальна файлова система зберігається локально в базі даних SQLite для забезпечення максимальної продуктивності та стабільної роботи офлайн. Усі конфіденційні дані (ключі розшифрування файлів) зберігаються в базі виключно у зашифрованому вигляді, а Майстер-ключ захищений системним сховищем пристрою (Secure Storage). Метадані автоматично синхронізуються з хмарою за допомогою механізму ETag.- **Secure File Sharing:** При створенні публічного посилання ключ розшифрування вбудовується у **фрагмент URL** (`#key=...`), який ніколи не надсилається на сервер, забезпечуючи безпечний обмін (Client-Side Decryption).
 - **Multipart Uploads:** Підтримка завантаження файлів об'ємом до 5 ГБ (обмеження платформи) з автоматичним відновленням завантаження чанків.
 - **Корзина з захистом:** Видалені файли зберігаються 7 днів. Сервер підтримує безпечне відновлення без ризику перезапису актуальних даних.
 
