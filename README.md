@@ -1,3 +1,8 @@
+> [!IMPORTANT]
+> **NOT RECOMMENDED** to install via `.exe` file. You may miss critical updates, leading to network synchronization errors and protocol mismatches.
+>
+> **RECOMMENDED:** Install via **Docker** following the guide on our official website. The Docker image includes **Watchover**, which automatically keeps your node updated to the latest version.
+
 # FABY Cloud: Hybrid Decentralized P2P Storage System
 
 FABY Cloud is a professional-grade, hybrid decentralized storage solution that combines the ease of use of S3-compatible cloud interfaces with the security and resilience of a Peer-to-Peer (P2P) network. It features a high-performance **Rust core** and a versatile **Python-based gateway**.
