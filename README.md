@@ -52,70 +52,109 @@ The P2P layer is built on the **libp2p** framework, supporting:
 └── faby-hoster/                # Storage Node logic
     ├── main.rs                 # Node entry point & disk management
     └── Cargo.toml              # Release-optimized build profile
+```
 
 
 
 
+## 🔧 Installation & Setup
 
-🔧 Installation & Setup
-Prerequisites
-Rust: 1.70+
+### Prerequisites
 
-Python: 3.9+
+-   Rust: 1.70+
 
-Maturin: Required to compile the Rust core (pip install maturin)
+-   Python: 3.9+
 
-Setting up the Hoster Node
+-   Maturin (required to compile the Rust core)
+
+    ``` bash
+    pip install maturin
+    ```
+
+------------------------------------------------------------------------
+
+## 🧩 Setting up the Hoster Node
+
 The Hoster node provides storage capacity to the network.
 
-Build:
+### Build
 
-Bash
+``` bash
 cd faby-hoster
 cargo build --release
-Configuration:
-Run the interactive setup to allocate disk space (min 100GB recommended):
+```
 
-Bash
+### Configuration
+
+Run the interactive setup to allocate disk space (min 100GB
+recommended):
+
+``` bash
 ./target/release/faby-hoster setup
-Run:
+```
 
-Bash
+### Run
+
+``` bash
 ./target/release/faby-hoster start --p2p-port 4001
-Setting up the S3 Gateway
+```
+
+------------------------------------------------------------------------
+
+## 🌐 Setting up the S3 Gateway
+
 The Gateway allows you to use the P2P network as a local S3 bucket.
 
-Compile the Rust Core:
+### Compile the Rust Core
 
-Bash
+``` bash
 cd faby-client
 maturin develop --release
-Initialize the Vault:
+```
+
+### Initialize the Vault
+
 The gateway uses a secure SQLite database to store file keys.
 
-Bash
+``` bash
 # Start the gateway
 python gateway.py
 
 # In another terminal, initialize the vault:
 curl -X POST http://localhost:9000/admin/vault/init
-[!WARNING]
-Save the 12-word seed phrase. It is the ONLY way to recover your data if the local database is lost.
+```
 
-🔄 How It Works (Data Lifecycle)
-PUT Request: An S3 client sends a file to the Gateway.
+> ⚠️ **WARNING**\
+> Save the 12-word seed phrase. It is the ONLY way to recover your data
+> if the local database is lost.
 
-Processing: The Gateway encrypts data (AES-GCM) and encodes it into 45 shards (Reed-Solomon).
+------------------------------------------------------------------------
 
-Allocation: The Gateway contacts FABY Grid to discover active hosters and receives a signed "Allocation Ticket".
+## 🔄 How It Works (Data Lifecycle)
 
-Distribution: Shards are uploaded directly to hoster nodes via P2P. Only metadata (chunk maps) is stored on the Grid.
+### PUT Request
 
-GET Request: The Gateway fetches the chunk map, connects to at least 30 hosters, reconstructs shards, and streams decrypted data back.
+An S3 client sends a file to the Gateway.
 
-🛡 Security & Compliance
-Master Key: Derived from your 12-word seed using PBKDF2.
+### Processing
 
-Audit Mechanism: Hosters must provide a proof-of-possession hash combined with a server-side salt to prove they still hold the data.
+The Gateway: - Encrypts data using AES-GCM - Encodes it into 45 shards
+using Reed-Solomon
 
-Auto-Backup: The Gateway automatically backs up an encrypted version of its internal database to the P2P network whenever keys are updated.
+### Allocation
+
+The Gateway contacts FABY Grid to: - Discover active hosters - Receive a
+signed "Allocation Ticket"
+
+### Distribution
+
+-   Shards are uploaded directly to hoster nodes via P2P
+-   Only metadata (chunk maps) is stored on the Grid
+
+### GET Request
+
+-   The Gateway fetches the chunk map
+-   Connects to at least 30 hosters
+-   Reconstructs shards
+-   Streams decrypted data back to the client
+
